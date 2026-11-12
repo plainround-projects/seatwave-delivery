@@ -1,0 +1,2 @@
+expand and contract    164,400 requests served,       0 failed
+one-step rename         41,100 requests served,  15,366 failed

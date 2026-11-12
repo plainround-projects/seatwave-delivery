@@ -1,0 +1,2 @@
+judged every minute    rolled back at minute 10; canary requests 54,000; canary errors 876
+judged once per step   rolled back at minute 15; canary requests 99,000; canary errors 2,693

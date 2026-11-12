@@ -1,0 +1,13 @@
+.gradle/
+build/
+out/
+*.log
+.DS_Store
+.idea/
+*.iml
+.env
+.secrets/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.bin

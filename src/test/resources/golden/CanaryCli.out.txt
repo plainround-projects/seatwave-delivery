@@ -1,0 +1,38 @@
+CANARY ANALYSIS at 3,000 requests a second; steps 1% for 5 min, 5% for 10, 25% for 10, then 100%
+bounds: errors and degraded above baseline + 1.0 point (95% confidence); p99 above baseline x 1.20
+judged every minute once the step holds 1,098 canary requests (to catch 2.5% errors against a 1.5% bound, 80% power)
+
+case: good release
+     1% to minute  5: canary     9,000 req, errors 0.58% (baseline 0.50%), degraded 0.17% (0.20%), p99 123 ms (120) -> pass
+     5% to minute 15: canary    90,000 req, errors 0.46% (baseline 0.49%), degraded 0.20% (0.20%), p99 121 ms (120) -> pass
+    25% to minute 25: canary   450,000 req, errors 0.49% (baseline 0.49%), degraded 0.20% (0.20%), p99 120 ms (120) -> pass
+  minute 25: promoted to 100%
+case: holds broken (5.5% errors)
+     1% to minute  1: canary     1,800 req, errors 6.00% (baseline 0.49%), degraded 0.39% (0.19%), p99 120 ms (121) -> ROLL BACK: errors 6.00% > bound 1.49% (test 1.96%)
+case: slow (p99 about 400 ms)
+     1% to minute  1: canary     1,800 req, errors 0.78% (baseline 0.52%), degraded 0.11% (0.20%), p99 419 ms (121) -> ROLL BACK: p99 419 ms > bound 145 ms
+case: degraded confirms (6%)
+     1% to minute  1: canary     1,800 req, errors 0.72% (baseline 0.50%), degraded 7.22% (0.21%), p99 119 ms (121) -> ROLL BACK: degraded 7.22% > bound 1.21% (test 1.64%)
+case: degraded confirms (6%), watching errors only
+     1% to minute  5: canary     9,000 req, errors 0.57% (baseline 0.51%), degraded 5.92% (0.21%), p99 123 ms (120) -> pass
+     5% to minute 15: canary    90,000 req, errors 0.48% (baseline 0.51%), degraded 6.01% (0.20%), p99 122 ms (121) -> pass
+    25% to minute 25: canary   450,000 req, errors 0.50% (baseline 0.51%), degraded 6.00% (0.20%), p99 120 ms (120) -> pass
+  minute 25: promoted to 100%
+case: holds broken (5.5% errors), all at once; a person rolls back after 20 minutes
+
+SUMMARY: requests sent to the new version before it was stopped or fully promoted
+case                                           outcome                         exposed     errors   degraded
+A good release, full analysis                  promoted at minute 25           549,000      2,695      1,100
+B holds broken (5.5% errors), full analysis    rolled back at minute 1           1,800        108          7
+C slow (p99 about 400 ms), full analysis       rolled back at minute 1           1,800         14          2
+D degraded confirms (6%), full analysis        rolled back at minute 1           1,800         13        130
+D degraded confirms (6%), errors only          promoted at minute 25           549,000      2,718     32,946
+E holds broken (5.5% errors), all at once      rolled back by hand, minute 20    3,600,000    198,820      7,186
+
+A CANARY TOO SMALL: subtle fault (2.0% errors) at night, 300 requests a second, 1% for 5 minutes
+  canary requests in the step: 300 x 0.01 x 300 s = 900
+  needed to catch 2.0% against 1.5% (95% confidence, 80% power): 4,040; for 2.5%: 1,098
+  time to 4,040 requests at 1%: 22.4 min; at 5%: 4.5 min
+     900 canary requests: fault caught in 349 of 1,000 seeded trials
+   4,040 canary requests: fault caught in 769 of 1,000 seeded trials
+  a fault in 1 of 5,000 requests: chance the 900-request step sees even one: 16%

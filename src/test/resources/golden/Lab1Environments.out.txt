@@ -1,0 +1,8 @@
+seatwave-staging: 9 to add
+seatwave: 10 to add
+seatwave-loadtest: 9 to add
+  differs: cluster_name staging seatwave-staging, production seatwave
+  differs: node_group_name staging seatwave-staging-use1-az1, production seatwave-use1-az1
+  differs: scaling_config.max_size staging 2, production 10
+  differs: scaling_config.min_size staging 1, production 3
+one compute zone refused: seatwave-onezone: a lost zone would leave the peak short

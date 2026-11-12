@@ -1,0 +1,68 @@
+# The lab database for Module 35's migrations: PostgreSQL alone, with Module 13's bookings table.
+# Start and stop it with scripts/stack.sh, which uses the project name seatwave-delivery and brings
+# everything down with "down -v".
+# The image is the Docker Official Image postgres:18.6 (Debian trixie), the same tag and digest as
+# Module 13's project, checked on Docker Hub on 12 November 2026, with an arm64 variant.
+# One port, published on 127.0.0.1 only, from Module 35's range 23500 to 23599. Nothing runs
+# privileged, nothing uses the host network or the Docker socket, and the only folder mounted is
+# this project's own db/init, read-only.
+name: seatwave-delivery
+
+services:
+  postgres:
+    image: postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: seatwave
+      # Every password is a file generated at run time into .secrets (scripts/stack.sh up) and
+      # removed by scripts/stack.sh down, together with the database that used it.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+      - owner_password
+      - app_password
+    # log_lock_waits writes a line for every lock wait longer than deadlock_timeout (1 s), which is
+    # how Section 10's runbook finds a migration stuck behind a long transaction.
+    command: ["postgres", "-c", "log_lock_waits=on"]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    # The entrypoint starts as root to own the data folder, then runs PostgreSQL as its own user.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    # Four CPUs like Module 1's reference machine; 2 GB of memory, not its 16 GB, because the
+    # Docker virtual machine (8 GB in all) is shared with other projects.
+    cpus: 4
+    mem_limit: 2g
+    shm_size: 256m
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    volumes:
+      - pgdata:/var/lib/postgresql
+      # Runs once, when the data volume is new: the two login roles and their rights.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:23500:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "seatwave"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+secrets:
+  postgres_password:
+    file: ./.secrets/postgres.password
+  owner_password:
+    file: ./.secrets/owner.password
+  app_password:
+    file: ./.secrets/app.password
+
+volumes:
+  pgdata:

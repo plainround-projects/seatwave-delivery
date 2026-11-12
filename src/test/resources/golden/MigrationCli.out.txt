@@ -1,0 +1,77 @@
+PLAN 1. EXPAND AND CONTRACT: rename bookings.price to price_paid over four releases
+  release 1: V35_1 add price_paid, nullable (expand)
+      ok for [v1]
+  release 1: V35_2 create the batched backfill procedure
+      ok for [v1]
+  release 1: roll out v2 (writes both, reads price)
+      ok for [v1, v2]
+      roll back to [v1]: possible
+  job: backfill price_paid in batches of 10,000
+      ok for [v2]
+      roll back to [v1]: possible
+  release 2: V35_3 add CHECK (price_paid IS NOT NULL) NOT VALID
+      ok for [v2]
+      roll back to [v1]: impossible, roll forward (v1 inserts without price_paid, which is NOT NULL)
+  release 2: V35_4 validate, price_paid SET NOT NULL, price DROP NOT NULL
+      ok for [v2]
+      roll back to [v1]: impossible, roll forward (v1 inserts without price_paid, which is NOT NULL)
+  release 2: roll out v3 (writes both; flag bookings.read-price-paid picks the read)
+      ok for [v2, v3 flag off, v3 flag on]
+      roll back to [v2]: possible
+  flag bookings.read-price-paid on at 100 percent, then locked on
+      ok for [v3 flag on]
+  release 3: roll out v4 (reads and writes price_paid only)
+      ok for [v3 flag on, v4]
+      roll back to [v3 flag on]: possible
+  release 4: V35_5 drop price (contract)
+      ok for [v4]
+      roll back to [v3 flag on]: impossible, roll forward (v3 flag on uses price, which does not exist)
+  release 4: roll out v5 (the flag's code deleted)
+      ok for [v4, v5]
+      roll back to [v4]: possible
+
+PLAN 2. THE SAME RENAME IN ONE RELEASE
+  one release: RENAME COLUMN price TO price_paid (Flyway on the first new pod)
+      BREAKS: v1 uses price, which does not exist
+      BREAKS: v1 inserts without price_paid, which is NOT NULL
+  one release: roll out v4
+      BREAKS: v1 uses price, which does not exist
+      BREAKS: v1 inserts without price_paid, which is NOT NULL
+      BREAKS: v4 reads price_paid, which rows from v1 lack
+      roll back to [v1]: impossible, roll forward (v1 uses price, which does not exist)
+  estimated failed requests: 300 a second x 51.3 s of old-pod traffic (25.7 s per pod, shares 3/3, 2/3, 1/3) = 15,400
+
+PLAN 3. BACKFILL BEFORE THE OLD CODE IS GONE
+  release 1: V35_1 add price_paid, nullable (expand)
+      ok for [v1]
+  job: backfill price_paid in batches of 10,000
+      BREAKS: v1 still inserts rows without price_paid after the backfill
+  release 1: roll out v2
+      ok for [v1, v2]
+      roll back to [v1]: possible
+
+PLAN 4. CONTRACT IN THE SAME RELEASE AS THE LAST CODE CHANGE
+  release 1: V35_1 and V35_2 add price_paid and the backfill
+      ok for [v1]
+  release 1: roll out v2
+      ok for [v1, v2]
+      roll back to [v1]: possible
+  job: backfill price_paid in batches of 10,000
+      ok for [v2]
+      roll back to [v1]: possible
+  release 2: V35_3 and V35_4
+      ok for [v2]
+      roll back to [v1]: impossible, roll forward (v1 inserts without price_paid, which is NOT NULL)
+  release 2: roll out v3
+      ok for [v2, v3 flag off, v3 flag on]
+      roll back to [v2]: possible
+  release 3: V35_5 drop price together with v4
+      BREAKS: v3 flag off uses price, which does not exist
+      BREAKS: v3 flag on uses price, which does not exist
+      roll back to [v2]: impossible, roll forward (v2 uses price, which does not exist)
+  release 3: roll out v4
+      BREAKS: v3 flag off uses price, which does not exist
+      BREAKS: v3 flag on uses price, which does not exist
+      roll back to [v3 flag off, v3 flag on]: impossible, roll forward (v3 flag off uses price, which does not exist)
+
+BACKFILL (estimated): 2,851,563 rows a shard, 286 batches of 10,000 at 0.1 s = 28.6 s a shard; 64 shards, 8 at a time: 229 s

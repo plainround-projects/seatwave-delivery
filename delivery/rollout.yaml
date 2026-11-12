@@ -1,0 +1,103 @@
+# SeatWave's canary: Argo Rollouts v1.10.2 with the Gateway API plugin v0.17.0 moves weight on
+# Module 33's HTTPRoute `seatwave` and rolls back by itself when the analysis fails.
+# NOT RUN (Section 13): no cluster was used; the fields follow the projects' documentation.
+# payment-service and notification-service (Module 39) get Rollouts of the same shape on their own
+# Deployments; a workload with no HTTPRoute is canaried by its share of pods instead of route weights.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: seatwave
+  namespace: seatwave
+spec:
+  # Module 33's Deployment stays the pod template; the Rollout takes over its pods step by step.
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: seatwave
+    scaleDown: progressively
+  strategy:
+    canary:
+      stableService: seatwave-stable
+      canaryService: seatwave-canary
+      trafficRouting:
+        plugins:
+          argoproj-labs/gatewayAPI:
+            httpRoute: seatwave
+            namespace: seatwave
+      analysis:
+        templates:
+          - templateName: seatwave-canary
+        startingStep: 1
+        args:
+          - name: stable-hash
+            valueFrom:
+              podTemplateHashValue: Stable
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+      steps:
+        - setWeight: 1
+        - pause: { duration: 5m }
+        - setWeight: 5
+        - pause: { duration: 10m }
+        - setWeight: 25
+        - pause: { duration: 10m }
+---
+# The bounds of Section 7: errors and degraded responses at most 1 point above the stable
+# version's, p99 at most 20 percent above it, judged every minute on the last 5 minutes.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: seatwave-canary
+  namespace: seatwave
+spec:
+  args:
+    - name: stable-hash
+    - name: canary-hash
+  metrics:
+    - name: canary-requests
+      # Too few canary requests to judge: neither condition holds, so the run is Inconclusive
+      # and the rollout pauses for a person; it never promotes on a timer.
+      interval: 1m
+      successCondition: result[0] >= 1098
+      failureCondition: result[0] < 0 # never true: a small sample is not a failure, only unproven
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            sum(increase(seatwave_requests_total{rollouts_pod_template_hash="{{args.canary-hash}}"}[5m]))
+    - name: error-rate-above-stable
+      interval: 1m
+      failureCondition: result[0] > 0.01
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            (sum(rate(seatwave_requests_total{result="error",rollouts_pod_template_hash="{{args.canary-hash}}"}[5m]))
+              / sum(rate(seatwave_requests_total{rollouts_pod_template_hash="{{args.canary-hash}}"}[5m])))
+            - (sum(rate(seatwave_requests_total{result="error",rollouts_pod_template_hash="{{args.stable-hash}}"}[5m]))
+              / sum(rate(seatwave_requests_total{rollouts_pod_template_hash="{{args.stable-hash}}"}[5m])))
+    - name: degraded-rate-above-stable
+      # Module 36: a 202 PENDING confirm is not an error, but a release that makes many is bad.
+      interval: 1m
+      failureCondition: result[0] > 0.01
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            (sum(rate(seatwave_requests_total{result="degraded",rollouts_pod_template_hash="{{args.canary-hash}}"}[5m]))
+              / sum(rate(seatwave_requests_total{rollouts_pod_template_hash="{{args.canary-hash}}"}[5m])))
+            - (sum(rate(seatwave_requests_total{result="degraded",rollouts_pod_template_hash="{{args.stable-hash}}"}[5m]))
+              / sum(rate(seatwave_requests_total{rollouts_pod_template_hash="{{args.stable-hash}}"}[5m])))
+    - name: p99-ratio-to-stable
+      interval: 1m
+      failureCondition: result[0] > 1.20
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            histogram_quantile(0.99, sum by (le) (rate(seatwave_request_duration_seconds_bucket{rollouts_pod_template_hash="{{args.canary-hash}}"}[5m])))
+            / histogram_quantile(0.99, sum by (le) (rate(seatwave_request_duration_seconds_bucket{rollouts_pod_template_hash="{{args.stable-hash}}"}[5m])))

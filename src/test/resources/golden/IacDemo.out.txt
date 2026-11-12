@@ -1,0 +1,57 @@
+PART 1. ONE DECLARATION, TWO ENVIRONMENTS
+staging, plan: 9 to add, 0 to change, 0 to replace, 0 to destroy
+staging, applied: state serial 1, 9 resources recorded
+staging, plan again: no changes
+production, plan: 10 to add, 0 to change, 0 to replace, 0 to destroy
+production, applied: state serial 1, 10 resources recorded
+
+PART 2. ONE EDIT, FOUR KINDS OF CHANGE (planned, not applied)
+  ~   aws_eks_node_group.zone["use1-az1"]  scaling_config.max_size: 10 -> 12
+  -/+ aws_eks_node_group.zone["use1-az2"]  instance_types: m7i.xlarge -> m7i.2xlarge
+  +   aws_eks_node_group.zone["use1-az4"]
+  -   aws_rds_cluster.shard["seatwave-db-b"]
+  1 to add, 1 to change, 1 to replace, 1 to destroy
+
+PART 3. DRIFT: a person lowers a node group's maximum in the console
+  drift: aws_eks_node_group.zone["use1-az2"] scaling_config.max_size recorded 10, real 4
+  ~   aws_eks_node_group.zone["use1-az2"]  scaling_config.max_size: 4 -> 10
+  0 to add, 1 to change, 0 to replace, 0 to destroy
+after apply: no changes
+
+PART 4. LOST AND STALE STATE
+production, third compute zone added, plan: 1 to add, 0 to change, 0 to replace, 0 to destroy
+production, third compute zone added, applied: state serial 3, 11 resources recorded
+stale copy (serial 2), plan: 1 to add, 0 to change, 0 to replace, 0 to destroy
+  refused on apply: [aws_eks_node_group.zone["use1-az4"]: aws_eks_node_group seatwave-use1-az4 already exists]
+  push of the stale copy: refused: serial 2 is not newer than the shared 3
+lost state (empty file), plan: 11 to add, 0 to change, 0 to replace, 0 to destroy
+  refused: aws_eks_cluster.seatwave: aws_eks_cluster seatwave already exists
+  refused: aws_eks_node_group.zone["use1-az1"]: aws_eks_node_group seatwave-use1-az1 already exists
+  refused: aws_eks_node_group.zone["use1-az2"]: aws_eks_node_group seatwave-use1-az2 already exists
+  refused: aws_eks_node_group.zone["use1-az4"]: aws_eks_node_group seatwave-use1-az4 already exists
+  refused: aws_rds_cluster.shard["seatwave-db-a"]: aws_rds_cluster seatwave-db-a already exists
+  refused: aws_rds_cluster.shard["seatwave-db-b"]: aws_rds_cluster seatwave-db-b already exists
+  account now holds 2 VPCs and 6 subnets; the new state knows only the new ones
+
+PART 5. TWO PIPELINES APPLY STAGING AT ONCE, NO_LOCKING
+A locks: acquired by pipeline-A
+B locks: acquired by pipeline-B
+A applied, state serial 2 records the third node group
+B applied from the same serial; its save overwrote A's
+final: state serial 2, 9 resources recorded, 3 node groups running
+next plan of merged main: 1 to add, 0 to change, 0 to replace, 0 to destroy
+  refused on apply: [aws_eks_node_group.zone["use1-az4"]: aws_eks_node_group seatwave-staging-use1-az4 already exists]
+
+PART 5. TWO PIPELINES APPLY STAGING AT ONCE, LOCKING
+A locks: acquired by pipeline-A
+B locks: refused, held by pipeline-A
+B waits, then runs on merged main (A's change and its own): acquired by pipeline-B
+B's plan: 0 to add, 1 to change, 0 to replace, 0 to destroy
+final: state serial 3, 10 resources recorded, 3 node groups running
+next plan of merged main: no changes
+  refused on apply: []
+
+PART 6. THE SAME ENVIRONMENT TWICE: DECLARATION AGAINST SCRIPT
+declaration applied twice in each of two accounts: fingerprints 607cc3a19a18 and 607cc3a19a18, 9 objects each
+script run 1: 9 objects, VPCs: 1, node group min_size 1, fingerprint 607cc3a19a18, errors []
+script run 2: 13 objects, VPCs: 2, node group min_size 2, fingerprint 7fc91452ff24, errors [seatwave-staging already exists, seatwave-staging-use1-az1 already exists, seatwave-staging-use1-az2 already exists, seatwave-staging-db-a already exists]

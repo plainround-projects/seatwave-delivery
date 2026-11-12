@@ -1,0 +1,86 @@
+# SeatWave's delivery pipeline, written as a design in a neutral format: each stage names the image
+# it runs in, its commands, the gate that stops it and what it hands to the next stage. Any CI
+# system can run it. NOT RUN: the course's repositories carry no enabled CI workflow and are
+# verified locally (Section 8 lists the local commands).
+pipeline: seatwave-delivery
+trigger: every merge to main, one at a time (a merge queue), never during an on-sale freeze
+runner_image: eclipse-temurin:25.0.5_8-jdk-noble@sha256:95e350ad1eb738f943e141640f7e3d797e483359a3b33c3864255bfd1ad71f8a
+tools: # exact versions, checked 11 November 2026
+  opentofu: 1.13.9
+  aws_provider: 6.72.0
+  flyway: 13.12.1
+  trivy: 0.76.2
+  cosign: 3.1.4
+  argo_rollouts: 1.10.2
+  kubectl: 1.37.2
+registry: 111122223333.dkr.ecr.us-east-1.amazonaws.com
+# Module 39 made payment its own deployable: three workloads, each its own image, Rollout and canary.
+# The stages below run once per deployable whose code changed; IMAGE is registry/<deployable>.
+deployables: [seatwave, payment-service, notification-service]
+freeze: on-sale calendar; no stage after "build" starts from 60 minutes before an announced on-sale to 30 minutes after it
+
+stages:
+  - name: build
+    run:
+      - ./gradlew build # javac -Xlint:all -Werror, unit tests, Module 32's boundary tests, Module 33's rollout test
+      - docker build --tag "$IMAGE:$COMMIT" .
+      - docker push "$IMAGE:$COMMIT"
+    gate: every test passes
+    hands_on: IMAGE_DIGEST, the sha256 the registry returned; every later stage uses "$IMAGE@$IMAGE_DIGEST"
+
+  - name: scan
+    run:
+      - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed "$IMAGE@$IMAGE_DIGEST"
+    gate: no fixable high or critical vulnerability
+
+  - name: sign
+    run:
+      - cosign sign --yes "$IMAGE@$IMAGE_DIGEST" # keyless: the pipeline's identity, no key file to leak
+    gate: the signature is in the registry
+
+  - name: plan-infrastructure
+    for_each_environment: [staging, production]
+    run:
+      - java -cp tools io.plainround.seatwave.cloud.failure.ZoneLossCli architecture/components.tsv # Module 34's gate
+      - tofu -chdir=infra/live init -backend-config="key=seatwave/$ENVIRONMENT.tfstate"
+      - tofu -chdir=infra/live plan -var="environment=$ENVIRONMENT" -detailed-exitcode -out=plan-$ENVIRONMENT.bin
+    gate: the zone-survival check passes; the plan shows only this change; no destroy of a data store
+    hands_on: plan-staging.bin and plan-production.bin, encrypted, applied later exactly as reviewed
+
+  - name: staging
+    run:
+      - tofu -chdir=infra/live apply plan-staging.bin
+      - flyway -environment=staging migrate
+      - ./gradlew compatibilityTest -Pschema=staging -Pcode=previous-release # the running release against the new schema
+      - kubectl argo rollouts set image "$DEPLOYABLE" "$DEPLOYABLE=$IMAGE@$IMAGE_DIGEST" --namespace seatwave
+      - ./gradlew smokeTest -Ptarget=staging
+    gate: compatibility and smoke tests pass on the exact digest
+    hands_on: the staging record (digest and gates passed), attested with cosign attest
+
+  - name: promote
+    run:
+      - ./gradlew promotionGate -Pimage="$IMAGE@$IMAGE_DIGEST" -PstagingRecord=staging-record.json # PromotionGate.decide
+      - cosign verify-attestation --type custom "$IMAGE@$IMAGE_DIGEST"
+    gate: production gets the digest staging tested, and every staging gate passed
+    approval: a person approves plan-production.bin when it changes infrastructure; code alone needs none
+
+  - name: production
+    run:
+      - tofu -chdir=infra/live apply plan-production.bin # only when the plan has changes
+      - flyway -environment=production migrate # expand steps only; a contract step needs its own release
+      - kubectl argo rollouts set image "$DEPLOYABLE" "$DEPLOYABLE=$IMAGE@$IMAGE_DIGEST" --namespace seatwave
+      - kubectl argo rollouts status "$DEPLOYABLE" --namespace seatwave --timeout 40m
+    gate: the canary of delivery/rollout.yaml finishes (1, 5, 25, then 100 percent); a failed analysis aborts it
+    on_failure: the rollout returns all traffic to the stable version by itself; the pipeline records a failed change
+
+scheduled:
+  - name: drift-check
+    every: hour
+    run:
+      - tofu -chdir=infra/live plan -var="environment=production" -detailed-exitcode -refresh-only
+    alert: exit code 2 means the real environment differs from the state; page the platform owner
+  - name: pre-scale
+    when: 10 minutes before each announced on-sale (Module 33), and back after it
+    run:
+      - kubectl patch hpa seatwave --namespace seatwave --patch '{"spec":{"minReplicas":30}}'
+    note: the HPA's minReplicas is owned by this job, so the drift check of the manifests ignores it
